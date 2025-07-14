@@ -1,100 +1,144 @@
-using Distributions
-using Optim
+include("initialize.jl")
+include("basic_functions.jl")
 
-Nobs = 900  # Number of observations
-# Parameters 
-# 3 types of households, 3 members in each household
-a = [0.5 0.3 0.2; 
-     0.4 0.2 0.1; 
-     0.3 0.1 0.5]  
-b = [0.1, 0.8, 0.6]
 
-# var-covar matrix for the error term 
-# Sigma is positive definite
-Sigma = [0.04 0.02 0.01; 
-         0.02 0.03 0.015; 
-         0.01 0.015 0.02]
-
-Mu = zeros(3) # Mean of the error term
-# Generate the error term from a multivariate normal distribution
-error_term = rand(MvNormal(Mu, Sigma), Nobs)
-# Log Expenditures come from N(1.0, 1.1^2) 
-log_expenditures = rand(Normal(1.0, 1.1), Nobs)
-w = zeros(Nobs, 3)
-
-# i = 1:300 use first row of a, i = 301:600 use second row of a, i = 601:900 use third row of a
-for i in 1:Nobs
-    if i <= 300
-        w[i, :] = a[1, :] .+ log_expenditures[i].*b .+ error_term[:, i]
-    elseif i > 300 & i <= 600
-        w[i, :] = a[2, :] .+ log_expenditures[i].*b .+ error_term[:, i]
-    else
-        w[i, :] = a[3, :] .+ log_expenditures[i].*b .+ error_term[:, i]
+function log_likelihood(errors::Matrix{Float64}, Sigma::Matrix{Float64})
+    # errors is a matrix of size Nobs x 3, where each row is an error vector for a household
+    # Sigma is a 9x9 matrix, which is a block diagonal matrix with 3x3 matrices for each household size type
+    # The log likelihood is calculated as the sum of the log likelihoods of each error vector
+    Nobs = size(errors, 1)
+    # Mu = zeros(3)  # Mean vector for the multivariate normal distribution
+    # LL_array = zeros(Nobs, 3)  # Log likelihood array for the errors 
+    ll = 0.0 
+     # Process each type separately to avoid repeated indexing
+    @inbounds for type in 1:3
+        S = @view Sigma[(type-1)*3+1:type*3, (type-1)*3+1:type*3]
+        dist = MvNormal(MU, S)
+        @inbounds for idx in TYPE_INDICES[type]
+            # Threads.atomic_add!(ll, logpdf(dist, @view errors[idx, :]))
+            ll += logpdf(dist, @view errors[idx, :])
+        end
     end
+    return -ll  # Return the negative log likelihood
 end
 
-# Data is a dataframe with four columns: budget shares = w1,w2,w3, exp = log_expenditures
-
-using DataFrames
-types = [ones(300), 2*ones(300), 3*ones(300)]
-data = DataFrame(b1 = w[:,1], b2 = w[:,2], b3 = w[:,3], exp = log_expenditures)
-data[!,"type"] = vcat(types...)
-# Maximum Likelihood Estimation to estimate the parameters a and b and Sigma
-# The procedure is as follows: Start with initial guess for Sigma = I
-# estimate a and b using the data (mle), then estimate Sigma using the residuals
-# Calculate the distance between the estimated Sigma and the initial guess
-# and use it to update the initial guess. Repeat until convergence.
-
-function mle(params, data, Sigma, Mu)
-    aa = params[1:9]  # First 9 parameters are a
-    bb = params[10:12]  # Last 3 parameters are b
-    # Sigma = reshape(params[13:end], 3, 3)  # Last 9 parameters are Sigma, reshape to 3x3 matrix
-    # Calculate the log-likelihood
-    log_likelihood = 0.0
-    for i in 1:Nobs
-        type = Int(data.type[i])
-        what = aa[(type-1)*3+1:type*3] .+ data.exp[i] .* bb
-        err_hat = collect(data[i, 1:3]) .- what
-        log_likelihood += log(pdf(MvNormal(Mu, Sigma), err_hat))
-    end
-    return -log_likelihood  # Return negative log-likelihood for minimization
-end  
-
-
-i = 0
-Sigma = [1.0 0.0 0.0; 
-        0.0 1.0 0.0; 
-        0.0 0.0 1.0]  # Initial guess for Sigma, identity matrix
-params = vcat(0.05*ones(9), 0.1*ones(3))  # Initial guess for a, b, and Sigma
-
-norm_diff = 1e6
-param_diff = 1e6
-while norm_diff > 1e-6 || param_diff > 1e-6
-    i += 1
-    optim_f = params -> mle(params, data, Sigma, Mu)
-    # Run the optimization
-    result = optimize(optim_f, params, NelderMead())
-    # Extract the estimated parameters
-    estimated_params = result.minimizer
-    a_est = estimated_params[1:9]
-    b_est = estimated_params[10:12]
-    
-    # Calculate the residuals at the estimated parameters
-    residuals = zeros(Nobs, 3)
-    for i in 1:Nobs
-        type = Int(data.type[i])
-        what = a_est[(type-1)*3+1:type*3] .+ data.exp[i] * b_est[type]
-        residuals[i, :] = collect(data[i, 1:3]) .- what
+function optim_func(guess::Vector{Float64}, Sigma::Matrix{Float64})
+    αm1 = @view guess[1:NX+1]
+    αm2 = @view guess[NX+2:2*NX+2]
+    αm3 = @view guess[2*NX+3:3*NX+3]
+    αf1 = @view guess[3*NX+4:4*NX+4]
+    αf2 = @view guess[4*NX+5:5*NX+5]
+    αf3 = @view guess[5*NX+6:6*NX+6]
+    αc1 = @view guess[6*NX+7:7*NX+7]
+    αc2 = @view guess[7*NX+8:8*NX+8]
+    αc3 = @view guess[8*NX+9:9*NX+9]
+    # βm, βf, βc are the next 3*Nx + 3 parameters
+    βm = @view guess[9*NX+10:10*NX+10]
+    βf = @view guess[10*NX+11:11*NX+11]
+    βc = @view guess[11*NX+12:12*NX+12]
+    # ηm1, ηm2, ηm3, ηf1, ηf2, ηf3 are the next 6*(NX + 2) parameters
+    ηm1 = @view guess[12*NX+13:13*NX+14]
+    ηm2 = @view guess[13*NX+15:14*NX+16]
+    ηm3 = @view guess[14*NX+17:15*NX+18]
+    ηf1 = @view guess[15*NX+19:16*NX+20]
+    ηf2 = @view guess[16*NX+21:17*NX+22]
+    ηf3 = @view guess[17*NX+23:18*NX+24]
+    errs = gen_errors(αm1, αm2, αm3, αf1, αf2, αf3, 
+                      αc1, αc2, αc3, βm, βf, βc, 
+                      ηm1, ηm2, ηm3, ηf1, ηf2, ηf3)
+    if isnothing(errs)
+        return 1e100  # Return a large value if errors are not generated
     end
     
-    # Estimate Sigma from the residuals
-    Sigma_est = cov(residuals)
-    
-    # Calculate the norm of the difference between params and sigma in each iteration
-    norm_diff = maximum(abs.(Sigma_est - Sigma))
-    param_diff = maximum(abs.(estimated_params - params))
-    @show norm_diff, param_diff, i
-    # Update the initial guess for Sigma
-    Sigma .= Sigma_est
-    params .= estimated_params
+    return log_likelihood(errs, Sigma)
 end
+
+function run_optimization()
+    αm1, αm2, αm3, 
+    αf1, αf2, αf3,
+    αc1, αc2, αc3 = ntuple(_ -> 0.01*ones(NX+1),9);
+
+    βm, βf, βc = ntuple(_ -> 0.01*ones(NX+1),3);
+
+    ηm1, ηm2, ηm3, 
+    ηf1, ηf2, ηf3 = ntuple(_ -> 0.01*ones(NX+2),6);
+
+    Sigma = Matrix{Float64}(I(9))  # Initial guess for Sigma, a 9x9 identity matrix
+    sigma_diff = 1e6
+    param_diff = 1e6
+    Nmax = 100
+    n = 0
+    init_guess = vcat(αm1, αm2, αm3, 
+                αf1, αf2, αf3, 
+                αc1, αc2, αc3, 
+                βm, βf, βc, 
+                ηm1, ηm2, ηm3, 
+                ηf1, ηf2, ηf3)
+    while sigma_diff > 1e-6 && n < Nmax
+        n += 1
+        optim_f = guess -> optim_func(guess, Sigma)
+        res = optimize(optim_f, init_guess, NelderMead(), Optim.Options(iterations=1000))
+        # param_diff = maximum(abs.(init_guess .- res.minimizer))
+        new_guess = res.minimizer
+        αm1 = @view new_guess[1:NX+1]
+        αm2 = @view new_guess[NX+2:2*NX+2]
+        αm3 = @view new_guess[2*NX+3:3*NX+3]
+        αf1 = @view new_guess[3*NX+4:4*NX+4]
+        αf2 = @view new_guess[4*NX+5:5*NX+5]
+        αf3 = @view new_guess[5*NX+6:6*NX+6]
+        αc1 = @view new_guess[6*NX+7:7*NX+7]
+        αc2 = @view new_guess[7*NX+8:8*NX+8]
+        αc3 = @view new_guess[8*NX+9:9*NX+9]
+        βm = @view new_guess[9*NX+10:10*NX+10]
+        βf = @view new_guess[10*NX+11:11*NX+11]
+        βc = @view new_guess[11*NX+12:12*NX+12]
+        ηm1 = @view new_guess[12*NX+13:13*NX+14]
+        ηm2 = @view new_guess[13*NX+15:14*NX+16]
+        ηm3 = @view new_guess[14*NX+17:15*NX+18]
+        ηf1 = @view new_guess[15*NX+19:16*NX+20]
+        ηf2 = @view new_guess[16*NX+21:17*NX+22]
+        ηf3 = @view new_guess[17*NX+23:18*NX+24]
+        errs = gen_errors(αm1, αm2, αm3, αf1, αf2, αf3, 
+                        αc1, αc2, αc3, βm, βf, βc, 
+                        ηm1, ηm2, ηm3, ηf1, ηf2, ηf3)
+        if isnothing(errs)
+            println("Errors not generated, skipping iteration")
+            continue
+        end
+        # Use pre-allocated arrays and in-place operations
+        sigma_1 = cov(@view errs[TYPE_INDICES[1], :])
+        sigma_2 = cov(@view errs[TYPE_INDICES[2], :])  
+        sigma_3 = cov(@view errs[TYPE_INDICES[3], :])
+
+        Sigma_new = [sigma_1 zeros(3,3) zeros(3,3);
+                    zeros(3,3) sigma_2 zeros(3,3);
+                    zeros(3,3) zeros(3,3) sigma_3]
+        sigma_diff = maximum(abs.(Sigma_new .- Sigma))
+        @show n, sigma_diff
+        Sigma = Sigma_new
+    end
+    return αm1, αm2, αm3, 
+           αf1, αf2, αf3,
+           αc1, αc2, αc3, 
+           βm, βf, βc, 
+           ηm1, ηm2, ηm3, 
+           ηf1, ηf2, ηf3, 
+           Sigma
+end
+
+αm1, αm2, αm3, 
+αf1, αf2, αf3, 
+αc1, αc2, αc3, 
+βm, βf, βc, 
+ηm1, ηm2, ηm3, 
+ηf1, ηf2, ηf3, Sigma = run_optimization();
+# Save the results to a file
+using Serialization
+
+serialize("mle_results_N100.jls", (αm1, αm2, αm3, αf1, αf2, αf3, αc1, αc2, αc3, βm, βf, βc, ηm1, ηm2, ηm3, ηf1, ηf2, ηf3, Sigma))
+
+println("Optimization complete. Final parameters: $αm1, $αm2, $αm3, $αf1, $αf2, $αf3, 
+        $αc1, $αc2, $αc3, $βm, $βf, $βc, 
+        $ηm1, $ηm2, $ηm3, $ηf1, $ηf2, $ηf3")
+println("Final Sigma: $Sigma")
+
